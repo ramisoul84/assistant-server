@@ -30,6 +30,7 @@ type Bot struct {
 	cmdExpenses     *commands.ExpensesCommand
 	cmdGym          *commands.GymCommand
 	cmdSummary      *commands.SummaryCommand
+	cmdBudget       *commands.BudgetCommand
 
 	aiParser service.AIParser
 	gymSvc   service.GymService
@@ -42,6 +43,7 @@ func New(
 	appointmentSvc service.AppointmentService,
 	expenseSvc service.ExpenseService,
 	gymSvc service.GymService,
+	budgetRepo repository.BudgetRepository,
 ) (*Bot, *telegram.Notifier, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.Telegram.Token)
 	if err != nil {
@@ -59,6 +61,7 @@ func New(
 		tgbotapi.BotCommand{Command: "expenses",     Description: "This month's expenses"},
 		tgbotapi.BotCommand{Command: "gym",          Description: "Last gym sessions"},
 		tgbotapi.BotCommand{Command: "summary",      Description: "Today's overview"},
+		tgbotapi.BotCommand{Command: "budget",       Description: "View or set monthly budget limit"},
 		tgbotapi.BotCommand{Command: "gym_start",    Description: "Start a gym session"},
 		tgbotapi.BotCommand{Command: "gym_end",      Description: "End current gym session"},
 		tgbotapi.BotCommand{Command: "cancel",       Description: "Cancel current action"},
@@ -82,6 +85,7 @@ func New(
 		cmdExpenses:     commands.NewExpensesCommand(expenseSvc),
 		cmdGym:          commands.NewGymCommand(gymSvc),
 		cmdSummary:      commands.NewSummaryCommand(appointmentSvc, expenseSvc, gymSvc),
+		cmdBudget:       commands.NewBudgetCommand(budgetRepo),
 	}
 	return b, notifier, nil
 }
@@ -286,6 +290,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *do
 		replyText, err = b.cmdGym.Handle(ctx, user.ID, msg.CommandArguments())
 	case "summary", "s":
 		replyText, err = b.cmdSummary.Handle(ctx, user.ID)
+	case "budget", "b":
+		replyText, err = b.cmdBudget.Handle(ctx, user.ID, msg.CommandArguments())
 	case "gym_start":
 		b.startGymSession(ctx, msg, user)
 		return
@@ -306,7 +312,7 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *do
 	}
 	if err != nil {
 		b.log.Error().Err(err).Str("command", msg.Command()).Msg("Command failed")
-		b.reply(msg, "❌ Failed to retrieve data\\. Please try again\\.")
+		b.reply(msg, "❌ Failed\\. Please try again\\.")
 		return
 	}
 	b.reply(msg, replyText)
@@ -338,7 +344,8 @@ func (b *Bot) cmdStart(user *domain.User) string {
 		"• \"Dentist tomorrow at 3pm\"\n"+
 		"• \"Spent 40€ on groceries\"\n\n"+
 		"*Gym:* /gym\\_start → log exercises → /gym\\_end\n\n"+
-		"*View:* /appointments · /expenses · /gym · /summary", escMD(user.FirstName))
+		"*View:* /appointments · /expenses · /gym · /summary\n"+
+		"*Budget:* /budget 1500 — set monthly spending limit", escMD(user.FirstName))
 }
 
 func cmdHelp() string {
@@ -347,6 +354,7 @@ func cmdHelp() string {
 		"*/expenses* \\[week|month|all\\]\n" +
 		"*/gym* \\[N\\] — last N sessions\n" +
 		"*/summary* — today's overview\n" +
+		"*/budget* \\[amount\\] — view or set monthly limit\n" +
 		"*/gym\\_start* — begin session\n" +
 		"*/gym\\_end* — finish session\n" +
 		"*/cancel* — cancel current action"

@@ -66,7 +66,6 @@ func (s *authService) RequestOTP(ctx context.Context, handle string) error {
 	}
 
 	code, err := generateOTP()
-	fmt.Println("Code generated", code)
 	if err != nil {
 		return fmt.Errorf("authService.RequestOTP: %w", err)
 	}

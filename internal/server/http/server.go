@@ -37,7 +37,6 @@ func New(cfg *config.Config) *Server {
 			return c.Status(code).JSON(fiber.Map{"error": err.Error()})
 		},
 	})
-
 	s := &Server{app: app, cfg: cfg, log: logger.Get()}
 	s.registerMiddleware()
 	return s
@@ -52,8 +51,7 @@ func (s *Server) registerMiddleware() {
 		if rid == "" {
 			rid = uuid.NewString()
 		}
-		ctx := context.WithValue(c.Context(), domain.RequestIDKey, rid)
-		c.SetUserContext(ctx)
+		c.SetUserContext(context.WithValue(c.Context(), domain.RequestIDKey, rid))
 		return c.Next()
 	})
 	s.app.Use(cors.New(cors.Config{
@@ -70,38 +68,40 @@ func (s *Server) RegisterRoutes(
 	authH *handler.AuthHandler,
 	apptH *handler.AppointmentHandler,
 	expH *handler.ExpenseHandler,
+	incomeH *handler.IncomeHandler,
 	gymH *handler.GymHandler,
+	budgetH *handler.BudgetHandler,
 ) {
 	api := s.app.Group("/api/v1")
+	api.Get("/health", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok"}) })
 
 	// Public
-	api.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok"})
-	})
-
-	// Auth (public)
 	auth := api.Group("/auth")
 	auth.Post("/request-otp", authH.RequestOTP)
 	auth.Post("/verify-otp", authH.VerifyOTP)
 
-	// Protected — all routes below require valid JWT
-	protected := api.Group("", middleware.RequireAuth(s.cfg.Auth.JWTSecret))
+	// Protected
+	p := api.Group("", middleware.RequireAuth(s.cfg.Auth.JWTSecret))
+	p.Get("/appointments", apptH.List)
+	p.Post("/appointments", apptH.Create)
+	p.Put("/appointments/:id", apptH.Update)
+	p.Delete("/appointments/:id", apptH.Delete)
 
-	// Appointments
-	protected.Get("/appointments", apptH.List)
-	protected.Post("/appointments", apptH.Create)
-	protected.Put("/appointments/:id", apptH.Update)
-	protected.Delete("/appointments/:id", apptH.Delete)
+	p.Get("/expenses", expH.List)
+	p.Post("/expenses", expH.Create)
+	p.Put("/expenses/:id", expH.Update)
+	p.Delete("/expenses/:id", expH.Delete)
 
-	// Expenses
-	protected.Get("/expenses", expH.List)
-	protected.Post("/expenses", expH.Create)
-	protected.Put("/expenses/:id", expH.Update)
-	protected.Delete("/expenses/:id", expH.Delete)
+	p.Get("/incomes", incomeH.List)
+	p.Post("/incomes", incomeH.Create)
+	p.Put("/incomes/:id", incomeH.Update)
+	p.Delete("/incomes/:id", incomeH.Delete)
 
-	// Gym
-	protected.Get("/gym/sessions", gymH.ListSessions)
-	protected.Delete("/gym/sessions/:id", gymH.DeleteSession)
-	protected.Put("/gym/exercises/:id", gymH.UpdateExercise)
-	protected.Delete("/gym/exercises/:id", gymH.DeleteExercise)
+	p.Get("/gym/sessions", gymH.ListSessions)
+	p.Delete("/gym/sessions/:id", gymH.DeleteSession)
+	p.Put("/gym/exercises/:id", gymH.UpdateExercise)
+	p.Delete("/gym/exercises/:id", gymH.DeleteExercise)
+
+	p.Get("/budget", budgetH.Get)
+	p.Put("/budget", budgetH.Upsert)
 }

@@ -10,9 +10,9 @@ import (
 	"github.com/ramisoul84/assistant-server/internal/bot"
 	"github.com/ramisoul84/assistant-server/internal/config"
 	"github.com/ramisoul84/assistant-server/internal/repository"
-	"github.com/ramisoul84/assistant-server/internal/service"
 	httpserver "github.com/ramisoul84/assistant-server/internal/server/http"
 	"github.com/ramisoul84/assistant-server/internal/server/http/handler"
+	"github.com/ramisoul84/assistant-server/internal/service"
 	"github.com/ramisoul84/assistant-server/pkg/ai"
 	"github.com/ramisoul84/assistant-server/pkg/database"
 	"github.com/ramisoul84/assistant-server/pkg/logger"
@@ -25,6 +25,7 @@ func main() {
 	}
 	cfg := config.Load(env)
 
+	// ── Logger ──────────────────────────────────────────────────────────────
 	logger.InitGlobal(cfg)
 	defer func() {
 		if err := logger.CloseGlobal(); err != nil {
@@ -47,44 +48,45 @@ func main() {
 	defer db.Close()
 	log.Info().Str("host", cfg.Database.Host).Msg("PostgreSQL connected")
 
-	// ── Repositories ─────────────────────────────────────────────────────────
-	userRepo        := repository.NewUserRepository(db)
+	// Repos
+	userRepo := repository.NewUserRepository(db)
 	appointmentRepo := repository.NewAppointmentRepository(db)
-	expenseRepo     := repository.NewExpenseRepository(db)
-	gymRepo         := repository.NewGymRepository(db)
-	otpRepo         := repository.NewOTPRepository(db)
+	expenseRepo := repository.NewExpenseRepository(db)
+	incomeRepo := repository.NewIncomeRepository(db)
+	gymRepo := repository.NewGymRepository(db)
+	otpRepo := repository.NewOTPRepository(db)
+	notifRepo := repository.NewNotificationRepository(db)
+	budgetRepo := repository.NewBudgetRepository(db)
 
-	// ── AI client ─────────────────────────────────────────────────────────────
+	// Services
 	groqClient := ai.NewGroqClient(cfg.AI)
+	aiParser := service.NewAIParserService(groqClient, cfg.AI.Model)
+	appointmentSvc := service.NewAppointmentService(appointmentRepo)
+	expenseSvc := service.NewExpenseService(expenseRepo)
+	incomeSvc := service.NewIncomeService(incomeRepo)
+	gymSvc := service.NewGymService(gymRepo)
 	log.Info().Str("model", cfg.AI.Model).Msg("Groq client ready")
 
-	// ── Services ─────────────────────────────────────────────────────────────
-	aiParser       := service.NewAIParserService(groqClient, cfg.AI.Model)
-	appointmentSvc := service.NewAppointmentService(appointmentRepo)
-	expenseSvc     := service.NewExpenseService(expenseRepo)
-	gymSvc         := service.NewGymService(gymRepo)
-
-	// ── Telegram Bot (also returns Notifier for OTP sending) ──────────────────
-	telegramBot, notifier, err := bot.New(cfg, userRepo, aiParser, appointmentSvc, expenseSvc, gymSvc)
+	// Bot
+	telegramBot, notifier, err := bot.New(cfg, userRepo, aiParser, appointmentSvc, expenseSvc, gymSvc, budgetRepo)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to initialize Telegram bot")
 	}
 
-	// ── Auth service (depends on notifier) ────────────────────────────────────
-	authSvc := service.NewAuthService(
-		userRepo, otpRepo, notifier,
-		cfg.Auth.JWTSecret, cfg.Auth.JWTExpiry, cfg.Auth.OTPExpiry,
-	)
+	// Auth + notifications
+	authSvc := service.NewAuthService(userRepo, otpRepo, notifier, cfg.Auth.JWTSecret, cfg.Auth.JWTExpiry, cfg.Auth.OTPExpiry)
+	notifSvc := service.NewNotificationService(appointmentRepo, expenseRepo, userRepo, budgetRepo, notifRepo, notifier)
 
-	// ── HTTP handlers ─────────────────────────────────────────────────────────
-	authHandler    := handler.NewAuthHandler(authSvc)
-	apptHandler    := handler.NewAppointmentHandler(appointmentSvc)
-	expenseHandler := handler.NewExpenseHandler(expenseSvc)
-	gymHandler     := handler.NewGymHandler(gymSvc)
-
-	// ── HTTP server ───────────────────────────────────────────────────────────
+	// HTTP
 	srv := httpserver.New(cfg)
-	srv.RegisterRoutes(authHandler, apptHandler, expenseHandler, gymHandler)
+	srv.RegisterRoutes(
+		handler.NewAuthHandler(authSvc),
+		handler.NewAppointmentHandler(appointmentSvc),
+		handler.NewExpenseHandler(expenseSvc),
+		handler.NewIncomeHandler(incomeSvc),
+		handler.NewGymHandler(gymSvc),
+		handler.NewBudgetHandler(budgetRepo),
+	)
 
 	listenErrCh := make(chan error, 1)
 	go func() {
@@ -95,12 +97,35 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	go func() { log.Info().Msg("Telegram bot started"); telegramBot.Start(ctx) }()
+
 	go func() {
-		log.Info().Msg("Telegram bot started")
-		telegramBot.Start(ctx)
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				notifSvc.CheckAppointments(ctx)
+			}
+		}
 	}()
 
-	// ── OTP cleanup — runs every hour ─────────────────────────────────────────
+	go func() {
+		notifSvc.CheckBudgets(ctx)
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				notifSvc.CheckBudgets(ctx)
+			}
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -109,14 +134,11 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := otpRepo.DeleteExpired(ctx); err != nil {
-					log.Error().Err(err).Msg("OTP cleanup failed")
-				}
+				_ = otpRepo.DeleteExpired(ctx)
 			}
 		}
 	}()
 
-	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(quit)

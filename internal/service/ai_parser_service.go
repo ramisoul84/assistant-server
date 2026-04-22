@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	openai "github.com/sashabaranov/go-openai"
 	"github.com/ramisoul84/assistant-server/internal/domain"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 type AIParser interface {

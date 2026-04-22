@@ -14,6 +14,8 @@ type AppointmentRepository interface {
 	Update(ctx context.Context, id, userID int64, title string, datetime time.Time, notes string) (*domain.Appointment, error)
 	Delete(ctx context.Context, id, userID int64) error
 	GetFiltered(ctx context.Context, userID int64, from, to *time.Time, limit int) ([]domain.Appointment, error)
+	// GetInWindow returns ALL users' appointments in a time window — used by the notification service.
+	GetInWindow(ctx context.Context, from, to time.Time) ([]domain.Appointment, error)
 }
 
 type appointmentRepo struct{ db *sqlx.DB }
@@ -54,7 +56,7 @@ func (r *appointmentRepo) Delete(ctx context.Context, id, userID int64) error {
 }
 
 func (r *appointmentRepo) GetFiltered(ctx context.Context, userID int64, from, to *time.Time, limit int) ([]domain.Appointment, error) {
-	q := `SELECT id, user_id, title, datetime, notes, created_at FROM appointments WHERE user_id = $1`
+	q := `SELECT id, user_id, title, datetime, notes, created_at FROM appointments WHERE user_id=$1`
 	args := []any{userID}
 	i := 2
 	if from != nil {
@@ -70,6 +72,19 @@ func (r *appointmentRepo) GetFiltered(ctx context.Context, userID int64, from, t
 	var list []domain.Appointment
 	if err := r.db.SelectContext(ctx, &list, q, args...); err != nil {
 		return nil, fmt.Errorf("appointmentRepo.GetFiltered: %w", err)
+	}
+	return list, nil
+}
+
+func (r *appointmentRepo) GetInWindow(ctx context.Context, from, to time.Time) ([]domain.Appointment, error) {
+	const q = `
+		SELECT id, user_id, title, datetime, notes, created_at
+		FROM appointments
+		WHERE datetime >= $1 AND datetime <= $2
+		ORDER BY datetime ASC`
+	var list []domain.Appointment
+	if err := r.db.SelectContext(ctx, &list, q, from, to); err != nil {
+		return nil, fmt.Errorf("appointmentRepo.GetInWindow: %w", err)
 	}
 	return list, nil
 }

@@ -22,7 +22,9 @@ type AppointmentService interface {
 	GetFiltered(ctx context.Context, userID int64, from, to *time.Time, limit int) ([]domain.Appointment, error)
 }
 
-type appointmentService struct{ repo repository.AppointmentRepository }
+type appointmentService struct {
+	repo repository.AppointmentRepository
+}
 
 func NewAppointmentService(repo repository.AppointmentRepository) AppointmentService {
 	return &appointmentService{repo: repo}
