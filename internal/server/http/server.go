@@ -23,14 +23,11 @@ type Server struct {
 
 func New(cfg *config.Config) *Server {
 	app := fiber.New(fiber.Config{
-		ReadTimeout:           cfg.Server.ReadTimeout,
-		WriteTimeout:          cfg.Server.WriteTimeout,
-		IdleTimeout:           cfg.Server.IdleTimeout,
-		BodyLimit:             cfg.Server.BodyLimitMB * 1024 * 1024,
+		ReadTimeout: cfg.Server.ReadTimeout, WriteTimeout: cfg.Server.WriteTimeout,
+		IdleTimeout: cfg.Server.IdleTimeout, BodyLimit: cfg.Server.BodyLimitMB * 1024 * 1024,
 		DisableStartupMessage: true,
-		ProxyHeader:           "X-Forwarded-For",
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
-			code := fiber.StatusInternalServerError
+			code := 500
 			if e, ok := err.(*fiber.Error); ok {
 				code = e.Code
 			}
@@ -38,14 +35,7 @@ func New(cfg *config.Config) *Server {
 		},
 	})
 	s := &Server{app: app, cfg: cfg, log: logger.Get()}
-	s.registerMiddleware()
-	return s
-}
-
-func (s *Server) App() *fiber.App { return s.app }
-
-func (s *Server) registerMiddleware() {
-	s.app.Use(requestid.New(requestid.Config{Header: "X-Request-ID"}))
+	s.app.Use(requestid.New())
 	s.app.Use(func(c *fiber.Ctx) error {
 		rid := c.GetRespHeader("X-Request-ID")
 		if rid == "" {
@@ -55,53 +45,43 @@ func (s *Server) registerMiddleware() {
 		return c.Next()
 	})
 	s.app.Use(cors.New(cors.Config{
-		AllowOrigins:     s.cfg.Server.AllowedOrigins,
+		AllowOrigins:     cfg.Server.AllowedOrigins,
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders:     "Origin,Content-Type,Authorization,X-Request-ID",
-		AllowCredentials: true,
-		MaxAge:           86400,
+		AllowHeaders:     "Origin,Content-Type,Authorization",
+		AllowCredentials: true, MaxAge: 86400,
 	}))
-	s.app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
+	s.app.Use(compress.New())
+	return s
 }
 
-func (s *Server) RegisterRoutes(
-	authH *handler.AuthHandler,
-	apptH *handler.AppointmentHandler,
-	expH *handler.ExpenseHandler,
-	incomeH *handler.IncomeHandler,
-	gymH *handler.GymHandler,
-	budgetH *handler.BudgetHandler,
-) {
+func (s *Server) App() *fiber.App { return s.app }
+
+func (s *Server) RegisterRoutes(auth *handler.AuthHandler, fin *handler.FinanceHandler, notes *handler.NoteHandler) {
 	api := s.app.Group("/api/v1")
 	api.Get("/health", func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"status": "ok"}) })
 
 	// Public
-	auth := api.Group("/auth")
-	auth.Post("/request-otp", authH.RequestOTP)
-	auth.Post("/verify-otp", authH.VerifyOTP)
+	api.Post("/auth/request-otp", auth.RequestOTP)
+	api.Post("/auth/verify-otp", auth.VerifyOTP)
 
 	// Protected
 	p := api.Group("", middleware.RequireAuth(s.cfg.Auth.JWTSecret))
-	p.Get("/appointments", apptH.List)
-	p.Post("/appointments", apptH.Create)
-	p.Put("/appointments/:id", apptH.Update)
-	p.Delete("/appointments/:id", apptH.Delete)
 
-	p.Get("/expenses", expH.List)
-	p.Post("/expenses", expH.Create)
-	p.Put("/expenses/:id", expH.Update)
-	p.Delete("/expenses/:id", expH.Delete)
+	p.Get("/expenses", fin.ListExpenses)
+	p.Post("/expenses", fin.CreateExpense)
+	p.Put("/expenses/:id", fin.UpdateExpense)
+	p.Delete("/expenses/:id", fin.DeleteExpense)
 
-	p.Get("/incomes", incomeH.List)
-	p.Post("/incomes", incomeH.Create)
-	p.Put("/incomes/:id", incomeH.Update)
-	p.Delete("/incomes/:id", incomeH.Delete)
+	p.Get("/incomes", fin.ListIncomes)
+	p.Post("/incomes", fin.CreateIncome)
+	p.Put("/incomes/:id", fin.UpdateIncome)
+	p.Delete("/incomes/:id", fin.DeleteIncome)
 
-	p.Get("/gym/sessions", gymH.ListSessions)
-	p.Delete("/gym/sessions/:id", gymH.DeleteSession)
-	p.Put("/gym/exercises/:id", gymH.UpdateExercise)
-	p.Delete("/gym/exercises/:id", gymH.DeleteExercise)
+	p.Get("/budget", fin.GetBudget)
+	p.Put("/budget", fin.UpsertBudget)
 
-	p.Get("/budget", budgetH.Get)
-	p.Put("/budget", budgetH.Upsert)
+	p.Get("/notes", notes.List)
+	p.Post("/notes", notes.Create)
+	p.Put("/notes/:id", notes.Update)
+	p.Delete("/notes/:id", notes.Delete)
 }

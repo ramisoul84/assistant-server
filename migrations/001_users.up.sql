@@ -5,5 +5,5 @@ CREATE TABLE IF NOT EXISTS users (
     first_name  TEXT        NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
 CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
+CREATE INDEX IF NOT EXISTS idx_users_handle      ON users(handle);

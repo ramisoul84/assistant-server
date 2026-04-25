@@ -2,48 +2,41 @@ package domain
 
 import "time"
 
-type IntentType string
+type Intent string
 
 const (
-	IntentAddAppointment IntentType = "add_appointment"
-	IntentAddExpense     IntentType = "add_expense"
-	IntentAddGymExercise IntentType = "add_gym_exercise" // single exercise line during open session
-	IntentIncomplete     IntentType = "incomplete"       // AI detected intent but missing required fields
-	IntentUnknown        IntentType = "unknown"
+	IntentSaveExpense Intent = "save_expense"
+	IntentSaveIncome  Intent = "save_income"
+	IntentSaveNote    Intent = "save_note"
+	IntentUnknown     Intent = "unknown"
 )
 
-type AIResponse struct {
-	Intent      IntentType         `json:"intent"`
-	Incomplete  string             `json:"incomplete,omitempty"` // "appointment" | "expense"
-	Appointment *AppointmentIntent `json:"appointment,omitempty"`
-	Expense     *ExpenseIntent     `json:"expense,omitempty"`
-	GymExercise *GymExerciseIntent `json:"gym_exercise,omitempty"`
-	Reply       string             `json:"reply"`
+type AIResult struct {
+	Intent  Intent     `json:"intent"`
+	Expense *ExpenseAI `json:"expense,omitempty"`
+	Income  *IncomeAI  `json:"income,omitempty"`
+	Note    *NoteAI    `json:"note,omitempty"`
+	Reply   string     `json:"reply"`
 }
 
-type AppointmentIntent struct {
-	Title    string    `json:"title"`
-	Datetime time.Time `json:"datetime"`
-	Notes    string    `json:"notes"`
-}
-
-type ExpenseIntent struct {
+type ExpenseAI struct {
 	Amount      float64   `json:"amount"`
 	Currency    string    `json:"currency"`
 	Category    string    `json:"category"`
 	Description string    `json:"description"`
-	SpentAt     time.Time `json:"spent_at"`
+	HappenedAt  time.Time `json:"happened_at"`
 }
 
-// GymExerciseIntent is one exercise line parsed during an open session.
-type GymExerciseIntent struct {
-	Name     string  `json:"name"`
-	Sets     int     `json:"sets"`
-	Reps     int     `json:"reps"`
-	WeightKg float64 `json:"weight_kg"`
-	Notes    string  `json:"notes"`
+type IncomeAI struct {
+	Amount      float64   `json:"amount"`
+	Currency    string    `json:"currency"`
+	Category    string    `json:"category"`
+	Description string    `json:"description"`
+	HappenedAt  time.Time `json:"happened_at"`
 }
 
-type contextKey string
-
-const RequestIDKey contextKey = "request_id"
+type NoteAI struct {
+	Content  string     `json:"content"`
+	Datetime *time.Time `json:"datetime,omitempty"`
+	Tags     []string   `json:"tags,omitempty"`
+}

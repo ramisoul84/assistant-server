@@ -1,6 +1,4 @@
 #!/bin/bash
-# deploy.sh
-
 set -e
 
 echo "── Pulling latest code ──"

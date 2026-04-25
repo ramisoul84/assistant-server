@@ -1,1 +1,0 @@
-DROP TABLE IF EXISTS gym_sessions CASCADE;

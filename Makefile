@@ -1,8 +1,10 @@
-build:
-	go build -o bin/rami-server ./cmd/...
+.PHONY: run build migrate
 
 run:
-	APP_ENV=development go run ./cmd/main.go
+	go run ./cmd/main.go
 
-tidy:
-	go mod tidy
+build:
+	go build -o bin/assistant ./cmd/main.go
+
+migrate:
+	./scripts/migrate_up.sh

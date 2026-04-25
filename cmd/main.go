@@ -19,17 +19,18 @@ import (
 )
 
 func main() {
+	// ── Config ────────────────────────────────────────────────────────────────
 	env := os.Getenv("APP_ENV")
 	if env == "" {
 		env = "development"
 	}
 	cfg := config.Load(env)
 
-	// ── Logger ──────────────────────────────────────────────────────────────
+	// ── Logger ────────────────────────────────────────────────────────────────
 	logger.InitGlobal(cfg)
 	defer func() {
 		if err := logger.CloseGlobal(); err != nil {
-			logger.Error().Err(err).Msg("Failed to close logger")
+			logger.Error().Err(err).Msg("failed to close logger")
 		}
 	}()
 	log := logger.Get()
@@ -38,125 +39,129 @@ func main() {
 		Str("env", cfg.App.Env).
 		Str("version", cfg.App.Version).
 		Int("pid", os.Getpid()).
-		Msg("Starting Assistant Server")
+		Msg("starting assistant server")
 
 	// ── Database ──────────────────────────────────────────────────────────────
 	db, err := database.Connect(cfg.Database)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to connect to PostgreSQL")
+		log.Fatal().Err(err).Msg("failed to connect to PostgreSQL")
 	}
 	defer db.Close()
 	log.Info().Str("host", cfg.Database.Host).Msg("PostgreSQL connected")
 
-	// Repos
+	// ── Repositories ─────────────────────────────────────────────────────────
 	userRepo := repository.NewUserRepository(db)
-	appointmentRepo := repository.NewAppointmentRepository(db)
-	expenseRepo := repository.NewExpenseRepository(db)
-	incomeRepo := repository.NewIncomeRepository(db)
-	gymRepo := repository.NewGymRepository(db)
+	finRepo := repository.NewFinanceRepository(db)
+	noteRepo := repository.NewNoteRepository(db)
 	otpRepo := repository.NewOTPRepository(db)
 	notifRepo := repository.NewNotificationRepository(db)
-	budgetRepo := repository.NewBudgetRepository(db)
 
-	// Services
+	// ── AI client ─────────────────────────────────────────────────────────────
 	groqClient := ai.NewGroqClient(cfg.AI)
-	aiParser := service.NewAIParserService(groqClient, cfg.AI.Model)
-	appointmentSvc := service.NewAppointmentService(appointmentRepo)
-	expenseSvc := service.NewExpenseService(expenseRepo)
-	incomeSvc := service.NewIncomeService(incomeRepo)
-	gymSvc := service.NewGymService(gymRepo)
+	aiSvc := service.NewAIService(groqClient, cfg.AI.Model)
 	log.Info().Str("model", cfg.AI.Model).Msg("Groq client ready")
 
-	// Bot
-	telegramBot, notifier, err := bot.New(cfg, userRepo, aiParser, appointmentSvc, expenseSvc, gymSvc, budgetRepo)
+	// ── Assistant service (no notifier needed) ────────────────────────────────
+	assistantSvc := service.NewAssistantService(finRepo, noteRepo)
+
+	// ── Telegram Bot ──────────────────────────────────────────────────────────
+	// Bot is built first because it owns the tgbotapi.BotAPI instance.
+	// It returns a *telegram.Notifier which is then injected into services
+	// that need to send Telegram messages (auth OTP, budget/appointment alerts).
+	telegramBot, notifier, err := bot.New(cfg, userRepo, finRepo, aiSvc, assistantSvc)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to initialize Telegram bot")
+		log.Fatal().Err(err).Msg("failed to initialise Telegram bot")
 	}
 
-	// Auth + notifications
+	// ── Services that depend on the notifier ─────────────────────────────────
+	// Both are constructed here — after the notifier is available — so there
+	// is no partial/nil initialisation and no double construction.
 	authSvc := service.NewAuthService(userRepo, otpRepo, notifier, cfg.Auth.JWTSecret, cfg.Auth.JWTExpiry, cfg.Auth.OTPExpiry)
-	notifSvc := service.NewNotificationService(appointmentRepo, expenseRepo, userRepo, budgetRepo, notifRepo, notifier)
+	notifSvc := service.NewNotifService(noteRepo, finRepo, userRepo, notifRepo, notifier)
 
-	// HTTP
+	// ── HTTP server ───────────────────────────────────────────────────────────
 	srv := httpserver.New(cfg)
 	srv.RegisterRoutes(
 		handler.NewAuthHandler(authSvc),
-		handler.NewAppointmentHandler(appointmentSvc),
-		handler.NewExpenseHandler(expenseSvc),
-		handler.NewIncomeHandler(incomeSvc),
-		handler.NewGymHandler(gymSvc),
-		handler.NewBudgetHandler(budgetRepo),
+		handler.NewFinanceHandler(finRepo),
+		handler.NewNoteHandler(noteRepo),
 	)
 
-	listenErrCh := make(chan error, 1)
-	go func() {
-		log.Info().Str("port", cfg.Server.Port).Msg("HTTP server listening")
-		listenErrCh <- srv.App().Listen(":" + cfg.Server.Port)
-	}()
-
+	// ── Root context — cancelled on shutdown ──────────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go func() { log.Info().Msg("Telegram bot started"); telegramBot.Start(ctx) }()
+	// ── Start subsystems ──────────────────────────────────────────────────────
+	listenErr := make(chan error, 1)
 
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				notifSvc.CheckAppointments(ctx)
-			}
-		}
+		log.Info().Str("port", cfg.Server.Port).Msg("HTTP server listening")
+		listenErr <- srv.App().Listen(":" + cfg.Server.Port)
 	}()
 
+	go func() {
+		log.Info().Msg("Telegram bot started")
+		telegramBot.Start(ctx)
+	}()
+
+	// Appointment reminders — every minute
+	go runEvery(ctx, time.Minute, func() {
+		notifSvc.CheckAppointments(ctx)
+	})
+
+	// Budget alerts — immediately on start, then every hour
 	go func() {
 		notifSvc.CheckBudgets(ctx)
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				notifSvc.CheckBudgets(ctx)
-			}
-		}
+		runEvery(ctx, time.Hour, func() {
+			notifSvc.CheckBudgets(ctx)
+		})
 	}()
 
-	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_ = otpRepo.DeleteExpired(ctx)
-			}
+	// OTP cleanup — every hour
+	go runEvery(ctx, time.Hour, func() {
+		if err := otpRepo.DeleteExpired(ctx); err != nil {
+			log.Error().Err(err).Msg("OTP cleanup failed")
 		}
-	}()
+	})
 
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(quit)
 
 	select {
-	case err := <-listenErrCh:
+	case err := <-listenErr:
 		if err != nil {
 			log.Fatal().Err(err).Msg("HTTP server error")
 		}
 	case sig := <-quit:
-		log.Info().Str("signal", sig.String()).Msg("Shutdown signal received")
+		log.Info().Str("signal", sig.String()).Msg("shutdown signal received")
 	}
 
+	// Stop background goroutines
 	cancel()
+
+	// Give Fiber 30 s to drain in-flight requests
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
+
 	if err := srv.App().ShutdownWithContext(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("HTTP forced shutdown")
+		log.Error().Err(err).Msg("forced HTTP shutdown")
 	}
-	log.Info().Msg("Server stopped gracefully")
+
+	log.Info().Msg("server stopped cleanly")
+}
+
+// runEvery ticks every interval and calls fn until ctx is cancelled.
+func runEvery(ctx context.Context, interval time.Duration, fn func()) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fn()
+		}
+	}
 }

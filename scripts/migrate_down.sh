@@ -5,11 +5,19 @@ if [ -f ".env.dev" ]; then
   export $(grep -v '^#' .env.dev | xargs)
 fi
 
-DB_URL="postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=${DB_SSL_MODE}"
+CONTAINER_NAME="postgres"
 
-echo "Running migrations DOWN (reverse order)..."
+# Check if the container is running
+if ! docker ps --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
+  echo "Error: PostgreSQL container '$CONTAINER_NAME' is not running"
+  exit 1
+fi
+
+echo "Running migrations DOWN (reverse order) in container: $CONTAINER_NAME"
+
 for f in $(ls migrations/*.down.sql | sort -r); do
   echo "  → $f"
-  psql "$DB_URL" -f "$f"
-done
+  docker exec -i "$CONTAINER_NAME" psql -U "$DB_USER" -d "$DB_NAME" -f -
+done < <(cat migrations/*.down.sql | sort -r)
+
 echo "Done."
