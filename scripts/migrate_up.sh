@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-[ -f .env.dev ] && export $(grep -v '^#' .env.dev | xargs)
+[ -f .env.prod ] && export $(grep -v '^#' .env.prod | xargs)
 
 echo "Running migrations UP..."
 

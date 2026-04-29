@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-if [ -f ".env.dev" ]; then
-  export $(grep -v '^#' .env.dev | xargs)
+if [ -f ".env.prod" ]; then
+  export $(grep -v '^#' .env.prod | xargs)
 fi
 
 CONTAINER_NAME="postgres"
