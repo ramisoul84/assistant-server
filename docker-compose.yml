@@ -10,8 +10,9 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - /var/log/assistant:/var/log/assistant
-    networks: [shared_net]
+    networks:
+      - infra_net
 
 networks:
-  shared_net:
+  infra_net:
     external: true
