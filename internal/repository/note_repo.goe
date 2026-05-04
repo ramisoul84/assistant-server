@@ -1,0 +1,104 @@
+package repository
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
+	"github.com/ramisoul84/assistant-server/internal/domain"
+)
+
+type NoteRepository interface {
+	Create(ctx context.Context, n *domain.Note) (*domain.Note, error)
+	Update(ctx context.Context, id, userID int64, content string, datetime *time.Time, tags []string) (*domain.Note, error)
+	Delete(ctx context.Context, id, userID int64) error
+	GetAll(ctx context.Context, userID int64, from, to *time.Time) ([]domain.Note, error)
+	GetUpcoming(ctx context.Context, from, to time.Time) ([]domain.Note, error)
+}
+
+type noteRepo struct{ db *sqlx.DB }
+
+func NewNoteRepository(db *sqlx.DB) NoteRepository { return &noteRepo{db: db} }
+
+func (r *noteRepo) Create(ctx context.Context, n *domain.Note) (*domain.Note, error) {
+	const q = `INSERT INTO notes (user_id,content,datetime,tags)
+		VALUES ($1,$2,$3,$4)
+		RETURNING id,user_id,content,datetime,tags,created_at,updated_at`
+	if err := r.db.GetContext(ctx, n, q, n.UserID, n.Content, n.Datetime, pq.Array(n.Tags)); err != nil {
+		return nil, fmt.Errorf("noteRepo.Create: %w", err)
+	}
+	return n, nil
+}
+
+func (r *noteRepo) Update(ctx context.Context, id, userID int64, content string, datetime *time.Time, tags []string) (*domain.Note, error) {
+	const q = `UPDATE notes SET content=$1,datetime=$2,tags=$3,updated_at=NOW()
+		WHERE id=$4 AND user_id=$5
+		RETURNING id,user_id,content,datetime,tags,created_at,updated_at`
+	var n domain.Note
+	if err := r.db.GetContext(ctx, &n, q, content, datetime, pq.Array(tags), id, userID); err != nil {
+		return nil, fmt.Errorf("noteRepo.Update: %w", err)
+	}
+	return &n, nil
+}
+
+func (r *noteRepo) Delete(ctx context.Context, id, userID int64) error {
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM notes WHERE id=$1 AND user_id=$2`, id, userID); err != nil {
+		return fmt.Errorf("noteRepo.Delete: %w", err)
+	}
+	return nil
+}
+
+func (r *noteRepo) GetAll(ctx context.Context, userID int64, from, to *time.Time) ([]domain.Note, error) {
+	q := `SELECT id,user_id,content,datetime,tags,created_at,updated_at FROM notes WHERE user_id=$1`
+	args := []any{userID}
+	i := 2
+	if from != nil {
+		q += fmt.Sprintf(" AND (datetime IS NULL OR datetime>=$%d)", i)
+		args = append(args, *from)
+		i++
+	}
+	if to != nil {
+		q += fmt.Sprintf(" AND (datetime IS NULL OR datetime<=$%d)", i)
+		args = append(args, *to)
+	}
+	q += " ORDER BY COALESCE(datetime,created_at) DESC"
+	rows, err := r.db.QueryxContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("noteRepo.GetAll: %w", err)
+	}
+	defer rows.Close()
+	var list []domain.Note
+	for rows.Next() {
+		var n domain.Note
+		var tags pq.StringArray
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Content, &n.Datetime, &tags, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		n.Tags = []string(tags)
+		list = append(list, n)
+	}
+	return list, nil
+}
+
+func (r *noteRepo) GetUpcoming(ctx context.Context, from, to time.Time) ([]domain.Note, error) {
+	const q = `SELECT id,user_id,content,datetime,tags,created_at,updated_at
+		FROM notes WHERE datetime IS NOT NULL AND datetime>=$1 AND datetime<=$2`
+	rows, err := r.db.QueryxContext(ctx, q, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("noteRepo.GetUpcoming: %w", err)
+	}
+	defer rows.Close()
+	var list []domain.Note
+	for rows.Next() {
+		var n domain.Note
+		var tags pq.StringArray
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Content, &n.Datetime, &tags, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		n.Tags = []string(tags)
+		list = append(list, n)
+	}
+	return list, nil
+}

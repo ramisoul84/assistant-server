@@ -41,10 +41,9 @@ func New(
 	log.Info().Str("username", api.Self.UserName).Msg("Bot authorized")
 
 	_, _ = api.Request(tgbotapi.NewSetMyCommands(
-		tgbotapi.BotCommand{Command: "today", Description: "Today's summary"},
+		tgbotapi.BotCommand{Command: "today",  Description: "Today's summary"},
 		tgbotapi.BotCommand{Command: "budget", Description: "View or set monthly budget limit"},
-		tgbotapi.BotCommand{Command: "timezone", Description: "Set your timezone (e.g. Europe/Moscow)"},
-		tgbotapi.BotCommand{Command: "help", Description: "How to use this assistant"},
+		tgbotapi.BotCommand{Command: "help",   Description: "How to use this assistant"},
 	))
 
 	return &Bot{api: api, log: log, users: users, finance: finance, ai: ai, assistant: assistant},
@@ -75,10 +74,17 @@ func (b *Bot) Start(ctx context.Context) {
 }
 
 func (b *Bot) handle(ctx context.Context, msg *tgbotapi.Message) {
-	user, err := b.users.FindOrCreate(ctx, msg.From.ID, msg.From.UserName, msg.From.FirstName)
+	user, err := b.users.FindOrCreate(ctx, msg.From.ID, msg.From.UserName, msg.From.FirstName, msg.From.LanguageCode)
 	if err != nil {
 		b.send(msg.Chat.ID, "Something went wrong. Please try again.")
 		return
+	}
+
+	// ── Silent timezone detection ─────────────────────────────────────────────
+	// If the user has no timezone yet, try to detect it from this message
+	// without blocking the user or asking any question.
+	if user.Timezone == "" || user.Timezone == "UTC" {
+		go b.tryDetectTimezone(ctx, user, msg.Text)
 	}
 
 	if msg.IsCommand() {
@@ -90,18 +96,10 @@ func (b *Bot) handle(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// Nudge users who haven't set a timezone yet so dates resolve correctly.
-	if user.Timezone == "" || user.Timezone == "UTC" {
-		b.send(msg.Chat.ID,
-			"⚠️ Your timezone is not set. Times might be saved incorrectly.\n"+
-				"Run /timezone Europe/Moscow (or your own city) to fix this, then try again.")
-		return
-	}
-
 	b.api.Send(tgbotapi.NewChatAction(msg.Chat.ID, tgbotapi.ChatTyping))
 
-	// KEY FIX: pass the user's current LOCAL time (with offset) — not UTC.
-	// This lets the AI resolve "tomorrow at 16" as 16:00 in the user's timezone.
+	// Use the user's local time so relative expressions ("at 16", "tomorrow")
+	// are resolved in their timezone, not UTC.
 	localNow := user.NowLocal()
 	result, err := b.ai.Parse(ctx, msg.Text, localNow)
 	if err != nil {
@@ -129,6 +127,128 @@ func (b *Bot) handle(ctx context.Context, msg *tgbotapi.Message) {
 	b.send(msg.Chat.ID, result.Reply)
 }
 
+// tryDetectTimezone runs in a goroutine — never blocks the message flow.
+// It asks the AI to infer a timezone from the message text, validates it,
+// and saves it silently. The user never sees this happening.
+func (b *Bot) tryDetectTimezone(ctx context.Context, user *domain.User, text string) {
+	if text == "" {
+		return
+	}
+
+	// Fallback: try to guess from Telegram language_code first (free, no API call)
+	// This covers the majority of cases without spending tokens.
+	if tz := timezoneFromLanguage(user.LanguageCode); tz != "" {
+		if err := b.users.SetTimezone(ctx, user.ID, tz); err == nil {
+			b.log.Info().
+				Int64("user_id", user.ID).
+				Str("timezone", tz).
+				Str("source", "language_code").
+				Msg("timezone detected")
+			return
+		}
+	}
+
+	// Second: use AI to detect from message content (costs ~10 tokens)
+	tz := b.ai.DetectTimezone(ctx, text)
+	if tz == "" {
+		return
+	}
+	if err := b.users.SetTimezone(ctx, user.ID, tz); err != nil {
+		b.log.Warn().Err(err).Str("timezone", tz).Msg("failed to save detected timezone")
+		return
+	}
+	b.log.Info().
+		Int64("user_id", user.ID).
+		Str("timezone", tz).
+		Str("source", "ai").
+		Msg("timezone detected from message")
+}
+
+// timezoneFromLanguage maps Telegram's language_code (BCP-47) to a primary IANA timezone.
+// This covers the most common cases instantly, without an AI call.
+// Not exhaustive — for rare codes the AI fallback handles it.
+func timezoneFromLanguage(code string) string {
+	if code == "" {
+		return ""
+	}
+	// Normalize: "ru-RU" → "ru", "en-US" → "en-US"
+	parts := strings.SplitN(strings.ToLower(code), "-", 2)
+	lang := parts[0]
+	region := ""
+	if len(parts) > 1 {
+		region = strings.ToUpper(parts[1])
+	}
+
+	// Region-specific overrides first (more precise)
+	regionMap := map[string]string{
+		"en-US": "America/New_York",
+		"en-GB": "Europe/London",
+		"en-AU": "Australia/Sydney",
+		"en-CA": "America/Toronto",
+		"en-IN": "Asia/Kolkata",
+		"en-AE": "Asia/Dubai",
+		"fr-CA": "America/Toronto",
+		"zh-TW": "Asia/Taipei",
+		"zh-HK": "Asia/Hong_Kong",
+		"pt-BR": "America/Sao_Paulo",
+		"es-MX": "America/Mexico_City",
+		"es-AR": "America/Argentina/Buenos_Aires",
+	}
+	if region != "" {
+		if tz, ok := regionMap[lang+"-"+region]; ok {
+			return tz
+		}
+	}
+
+	// Language-level defaults
+	langMap := map[string]string{
+		"ru": "Europe/Moscow",
+		"uk": "Europe/Kiev",
+		"ar": "Asia/Riyadh",
+		"tr": "Europe/Istanbul",
+		"de": "Europe/Berlin",
+		"fr": "Europe/Paris",
+		"es": "Europe/Madrid",
+		"it": "Europe/Rome",
+		"pl": "Europe/Warsaw",
+		"nl": "Europe/Amsterdam",
+		"pt": "Europe/Lisbon",
+		"sv": "Europe/Stockholm",
+		"nb": "Europe/Oslo",
+		"da": "Europe/Copenhagen",
+		"fi": "Europe/Helsinki",
+		"cs": "Europe/Prague",
+		"sk": "Europe/Bratislava",
+		"hu": "Europe/Budapest",
+		"ro": "Europe/Bucharest",
+		"bg": "Europe/Sofia",
+		"hr": "Europe/Zagreb",
+		"sr": "Europe/Belgrade",
+		"sl": "Europe/Ljubljana",
+		"lt": "Europe/Vilnius",
+		"lv": "Europe/Riga",
+		"et": "Europe/Tallinn",
+		"el": "Europe/Athens",
+		"he": "Asia/Jerusalem",
+		"fa": "Asia/Tehran",
+		"hi": "Asia/Kolkata",
+		"bn": "Asia/Dhaka",
+		"ur": "Asia/Karachi",
+		"vi": "Asia/Ho_Chi_Minh",
+		"th": "Asia/Bangkok",
+		"id": "Asia/Jakarta",
+		"ms": "Asia/Kuala_Lumpur",
+		"zh": "Asia/Shanghai",
+		"ja": "Asia/Tokyo",
+		"ko": "Asia/Seoul",
+		"ka": "Asia/Tbilisi",
+		"az": "Asia/Baku",
+		"kk": "Asia/Almaty",
+		"uz": "Asia/Tashkent",
+	}
+	return langMap[lang]
+}
+
 func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *domain.User) {
 	switch msg.Command() {
 
@@ -140,13 +260,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *do
 				"💰 \"Got paid 3000 EUR salary\"\n"+
 				"📅 \"Dentist next Monday 3pm\"\n"+
 				"📝 \"Remember to call the bank\"\n\n"+
-				"⚠️ *Important:* Set your timezone first so times are saved correctly:\n"+
-				"/timezone Europe/Moscow\n\n"+
 				"/help for full guide.",
 			user.FirstName))
-
-	case "timezone":
-		b.handleTimezone(ctx, msg, user)
 
 	case "today":
 		b.handleToday(ctx, msg, user)
@@ -157,11 +272,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *do
 	case "help":
 		b.send(msg.Chat.ID,
 			"📖 *How to use me*\n\n"+
-				"*First — set your timezone:*\n"+
-				"/timezone Europe/Moscow\n"+
-				"/timezone America/New_York\n"+
-				"/timezone Asia/Dubai\n\n"+
-				"*Then just write naturally:*\n\n"+
 				"*Expenses:*\n"+
 				"→ \"Spent 45 on groceries\"\n"+
 				"→ \"Coffee 3.50\"\n\n"+
@@ -175,7 +285,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *do
 				"*Commands:*\n"+
 				"/today — daily summary\n"+
 				"/budget 1500 — set monthly limit\n"+
-				"/timezone City/Region — set your timezone\n"+
 				"/help — this guide")
 
 	default:
@@ -183,82 +292,21 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message, user *do
 	}
 }
 
-// handleTimezone sets the user's IANA timezone.
-// Usage: /timezone Europe/Moscow
-func (b *Bot) handleTimezone(ctx context.Context, msg *tgbotapi.Message, user *domain.User) {
-	args := strings.TrimSpace(msg.CommandArguments())
-
-	// No argument — show current timezone and examples
-	if args == "" {
-		current := user.Timezone
-		if current == "" {
-			current = "not set"
-		}
-		b.send(msg.Chat.ID, fmt.Sprintf(
-			"🌍 *Your timezone:* %s\n\n"+
-				"To change it, send:\n"+
-				"`/timezone Europe/Moscow`\n"+
-				"`/timezone America/New_York`\n"+
-				"`/timezone Asia/Dubai`\n"+
-				"`/timezone Asia/Riyadh`\n"+
-				"`/timezone Europe/London`\n\n"+
-				"Use the format *Continent/City* from the IANA timezone list.",
-			current))
-		return
-	}
-
-	// Validate the timezone by trying to load it
-	loc, err := time.LoadLocation(args)
-	if err != nil {
-		b.send(msg.Chat.ID, fmt.Sprintf(
-			"❌ Unknown timezone: *%s*\n\n"+
-				"Examples of valid timezones:\n"+
-				"• Europe/Moscow\n"+
-				"• America/New_York\n"+
-				"• Asia/Dubai\n"+
-				"• Europe/London\n"+
-				"• Asia/Tokyo\n\n"+
-				"Find yours at: worldtimeapi.org/api/timezone",
-			args))
-		return
-	}
-
-	if err := b.users.SetTimezone(ctx, user.ID, args); err != nil {
-		b.log.Error().Err(err).Msg("SetTimezone failed")
-		b.send(msg.Chat.ID, "Failed to save timezone. Please try again.")
-		return
-	}
-
-	// Show the current local time in the new timezone as confirmation
-	localTime := time.Now().In(loc).Format("Mon Jan 2, 15:04")
-	b.send(msg.Chat.ID, fmt.Sprintf(
-		"✅ Timezone set to *%s*\n"+
-			"Your local time: *%s*\n\n"+
-			"All future dates will now be saved in your local time.",
-		args, localTime))
-}
-
-// handleToday shows the daily summary in the user's local timezone.
 func (b *Bot) handleToday(ctx context.Context, msg *tgbotapi.Message, user *domain.User) {
 	loc := user.Location()
 	now := time.Now().In(loc)
 
-	// Month boundaries in user's local timezone
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
 	in7 := now.AddDate(0, 0, 7)
 
 	expenses, _ := b.finance.GetExpenses(ctx, user.ID, &monthStart, nil)
-	incomes, _ := b.finance.GetIncomes(ctx, user.ID, &monthStart, nil)
-	budget, _ := b.finance.GetBudget(ctx, user.ID)
-	upNotes, _ := b.assistant.GetUpcomingNotes(ctx, user.ID, now, in7)
+	incomes, _  := b.finance.GetIncomes(ctx, user.ID, &monthStart, nil)
+	budget, _   := b.finance.GetBudget(ctx, user.ID)
+	upNotes, _  := b.assistant.GetUpcomingNotes(ctx, user.ID, now, in7)
 
 	var spent, earned float64
-	for _, e := range expenses {
-		spent += e.Amount
-	}
-	for _, i := range incomes {
-		earned += i.Amount
-	}
+	for _, e := range expenses { spent += e.Amount }
+	for _, i := range incomes  { earned += i.Amount }
 
 	txt := fmt.Sprintf("📊 *%s*\n\n", now.Format("Mon, Jan 2"))
 	txt += "💰 *This month*\n"
@@ -273,7 +321,6 @@ func (b *Bot) handleToday(ctx context.Context, msg *tgbotapi.Message, user *doma
 	if len(upNotes) > 0 {
 		txt += "\n📅 *Upcoming (7 days)*\n"
 		for _, n := range upNotes {
-			// Display time in user's local timezone
 			localTime := n.Datetime.Time.In(loc)
 			diff := time.Until(n.Datetime.Time)
 			var when string
@@ -289,11 +336,10 @@ func (b *Bot) handleToday(ctx context.Context, msg *tgbotapi.Message, user *doma
 	b.send(msg.Chat.ID, txt)
 }
 
-// handleBudget views or sets the monthly budget.
 func (b *Bot) handleBudget(ctx context.Context, msg *tgbotapi.Message, user *domain.User) {
 	args := strings.TrimSpace(msg.CommandArguments())
-	loc := user.Location()
-	now := time.Now().In(loc)
+	loc  := user.Location()
+	now  := time.Now().In(loc)
 
 	if args == "" {
 		bud, err := b.finance.GetBudget(ctx, user.ID)
@@ -304,9 +350,7 @@ func (b *Bot) handleBudget(ctx context.Context, msg *tgbotapi.Message, user *dom
 		monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, loc)
 		expenses, _ := b.finance.GetExpenses(ctx, user.ID, &monthStart, nil)
 		var spent float64
-		for _, e := range expenses {
-			spent += e.Amount
-		}
+		for _, e := range expenses { spent += e.Amount }
 		pct := (spent / bud.Amount) * 100
 		b.send(msg.Chat.ID, fmt.Sprintf(
 			"💰 *Monthly budget:* %.0f %s\n💸 *Spent:* %.2f (%.0f%%)\n✅ *Remaining:* %.2f",
@@ -329,16 +373,10 @@ func (b *Bot) handleBudget(ctx context.Context, msg *tgbotapi.Message, user *dom
 
 func progressBar(pct float64) string {
 	filled := int(pct / 10)
-	if filled > 10 {
-		filled = 10
-	}
+	if filled > 10 { filled = 10 }
 	bar := ""
 	for i := 0; i < 10; i++ {
-		if i < filled {
-			bar += "█"
-		} else {
-			bar += "░"
-		}
+		if i < filled { bar += "█" } else { bar += "░" }
 	}
 	return bar
 }

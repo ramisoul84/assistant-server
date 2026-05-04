@@ -11,7 +11,7 @@ import (
 )
 
 type UserRepository interface {
-	FindOrCreate(ctx context.Context, telegramID int64, handle, firstName string) (*domain.User, error)
+	FindOrCreate(ctx context.Context, telegramID int64, handle, firstName, languageCode string) (*domain.User, error)
 	FindByHandle(ctx context.Context, handle string) (*domain.User, error)
 	FindByID(ctx context.Context, id int64) (*domain.User, error)
 	SetTimezone(ctx context.Context, userID int64, timezone string) error
@@ -21,22 +21,25 @@ type userRepo struct{ db *sqlx.DB }
 
 func NewUserRepository(db *sqlx.DB) UserRepository { return &userRepo{db: db} }
 
-func (r *userRepo) FindOrCreate(ctx context.Context, telegramID int64, handle, firstName string) (*domain.User, error) {
+func (r *userRepo) FindOrCreate(ctx context.Context, telegramID int64, handle, firstName, languageCode string) (*domain.User, error) {
 	const q = `
-		INSERT INTO users (telegram_id, handle, first_name)
-		VALUES ($1, $2, $3)
+		INSERT INTO users (telegram_id, handle, first_name, language_code)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (telegram_id) DO UPDATE
-			SET handle = EXCLUDED.handle, first_name = EXCLUDED.first_name
-		RETURNING id, telegram_id, handle, first_name, timezone, created_at`
+			SET handle        = EXCLUDED.handle,
+			    first_name    = EXCLUDED.first_name,
+			    language_code = EXCLUDED.language_code
+		RETURNING id, telegram_id, handle, first_name, language_code, timezone, created_at`
 	var u domain.User
-	if err := r.db.GetContext(ctx, &u, q, telegramID, handle, firstName); err != nil {
+	if err := r.db.GetContext(ctx, &u, q, telegramID, handle, firstName, languageCode); err != nil {
 		return nil, fmt.Errorf("userRepo.FindOrCreate: %w", err)
 	}
 	return &u, nil
 }
 
 func (r *userRepo) FindByHandle(ctx context.Context, handle string) (*domain.User, error) {
-	const q = `SELECT id, telegram_id, handle, first_name, timezone, created_at FROM users WHERE handle = $1`
+	const q = `SELECT id, telegram_id, handle, first_name, language_code, timezone, created_at
+		FROM users WHERE handle = $1`
 	var u domain.User
 	if err := r.db.GetContext(ctx, &u, q, handle); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -48,7 +51,8 @@ func (r *userRepo) FindByHandle(ctx context.Context, handle string) (*domain.Use
 }
 
 func (r *userRepo) FindByID(ctx context.Context, id int64) (*domain.User, error) {
-	const q = `SELECT id, telegram_id, handle, first_name, timezone, created_at FROM users WHERE id = $1`
+	const q = `SELECT id, telegram_id, handle, first_name, language_code, timezone, created_at
+		FROM users WHERE id = $1`
 	var u domain.User
 	if err := r.db.GetContext(ctx, &u, q, id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

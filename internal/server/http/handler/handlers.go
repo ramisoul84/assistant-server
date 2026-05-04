@@ -30,13 +30,15 @@ func (h *AuthHandler) RequestOTP(c *fiber.Ctx) error {
 
 func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
 	var b struct {
-		Handle string `json:"handle"`
-		Code   string `json:"code"`
+		Handle   string `json:"handle"`
+		Code     string `json:"code"`
+		Timezone string `json:"timezone"` // IANA timezone from browser, e.g. "Europe/Moscow"
 	}
 	if err := c.BodyParser(&b); err != nil || b.Handle == "" || b.Code == "" {
 		return fiber.NewError(fiber.StatusBadRequest, "handle and code required")
 	}
-	token, err := h.svc.VerifyOTP(c.UserContext(), b.Handle, b.Code)
+	// Pass timezone through — service validates and saves it silently
+	token, err := h.svc.VerifyOTP(c.UserContext(), b.Handle, b.Code, b.Timezone)
 	if err != nil {
 		return fiber.NewError(fiber.StatusUnauthorized, "invalid or expired code")
 	}

@@ -18,7 +18,10 @@ type Notifier interface {
 
 type AuthService interface {
 	RequestOTP(ctx context.Context, handle string) error
-	VerifyOTP(ctx context.Context, handle, code string) (string, error)
+	// VerifyOTP now accepts an optional timezone (IANA string).
+	// When provided (from the browser via Angular), it is persisted immediately
+	// so all future date parsing uses the correct local time.
+	VerifyOTP(ctx context.Context, handle, code, timezone string) (string, error)
 }
 
 type authService struct {
@@ -31,8 +34,22 @@ type authService struct {
 	log       logger.Logger
 }
 
-func NewAuthService(users repository.UserRepository, otp repository.OTPRepository, notifier Notifier, secret string, jwtExpiry, otpExpiry time.Duration) AuthService {
-	return &authService{users: users, otp: otp, notifier: notifier, secret: secret, jwtExpiry: jwtExpiry, otpExpiry: otpExpiry, log: logger.Get()}
+func NewAuthService(
+	users repository.UserRepository,
+	otp repository.OTPRepository,
+	notifier Notifier,
+	secret string,
+	jwtExpiry, otpExpiry time.Duration,
+) AuthService {
+	return &authService{
+		users:     users,
+		otp:       otp,
+		notifier:  notifier,
+		secret:    secret,
+		jwtExpiry: jwtExpiry,
+		otpExpiry: otpExpiry,
+		log:       logger.Get(),
+	}
 }
 
 func (s *authService) RequestOTP(ctx context.Context, handle string) error {
@@ -42,7 +59,7 @@ func (s *authService) RequestOTP(ctx context.Context, handle string) error {
 	user, err := s.users.FindByHandle(ctx, handle)
 	if err != nil {
 		s.log.Warn().Str("handle", handle).Msg("OTP requested for unknown handle")
-		return nil // don't leak existence
+		return nil // don't leak whether handle exists
 	}
 	b := make([]byte, 3)
 	rand.Read(b)
@@ -50,10 +67,11 @@ func (s *authService) RequestOTP(ctx context.Context, handle string) error {
 	if _, err := s.otp.Create(ctx, user.ID, code, time.Now().Add(s.otpExpiry)); err != nil {
 		return err
 	}
-	return s.notifier.SendMessage(user.TelegramID, fmt.Sprintf("🔐 Your login code: *%s*\n\nExpires in 5 minutes.", code))
+	return s.notifier.SendMessage(user.TelegramID,
+		fmt.Sprintf("🔐 Your login code: *%s*\n\nExpires in 5 minutes.", code))
 }
 
-func (s *authService) VerifyOTP(ctx context.Context, handle, code string) (string, error) {
+func (s *authService) VerifyOTP(ctx context.Context, handle, code, timezone string) (string, error) {
 	if len(handle) > 0 && handle[0] == '@' {
 		handle = handle[1:]
 	}
@@ -66,5 +84,33 @@ func (s *authService) VerifyOTP(ctx context.Context, handle, code string) (strin
 		return "", domain.ErrUnauthorized
 	}
 	_ = s.otp.MarkUsed(ctx, rec.ID)
-	return jwt.Issue(s.secret, s.jwtExpiry, domain.AuthClaims{UserID: user.ID, TelegramID: user.TelegramID, Handle: user.Handle})
+
+	// Persist the browser timezone if valid and not already set.
+	// This runs silently — no user action required.
+	if timezone != "" && isValidTimezone(timezone) {
+		if err := s.users.SetTimezone(ctx, user.ID, timezone); err != nil {
+			// Non-fatal: log but don't fail the login
+			s.log.Warn().Err(err).Str("timezone", timezone).Msg("failed to save timezone on login")
+		} else {
+			s.log.Info().
+				Int64("user_id", user.ID).
+				Str("timezone", timezone).
+				Msg("timezone set from browser on login")
+		}
+	}
+
+	return jwt.Issue(s.secret, s.jwtExpiry, domain.AuthClaims{
+		UserID:     user.ID,
+		TelegramID: user.TelegramID,
+		Handle:     user.Handle,
+	})
+}
+
+// isValidTimezone checks whether the string is a valid IANA timezone name.
+func isValidTimezone(tz string) bool {
+	if tz == "" || tz == "UTC" {
+		return false
+	}
+	_, err := time.LoadLocation(tz)
+	return err == nil
 }
